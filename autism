@@ -1,0 +1,158 @@
+#!/usr/bin/ty -q
+
+import os (argv)
+
+fn almost-trim(s) {
+    s.comb(/^(?:.(?=\s))+/)
+}
+
+macro eq-pattern   = /^(\s*)(.*?)([* ]+(?:\w|\.|->|\[.*\])+)\s*=(.*);\s*$/
+macro decl-pattern = /^(.*\w)([* ]+\w+)(.*);\s*$/
+macro eq-cols      = /^(\s*)(\w[^=]*?)([* ]+)(\w*)\s*(=?)\s*(.*?);?\s*$/
+
+if let [_, cmd] = argv {
+    (setup().min-by(\cmd.edit-distance(_.0[;#cmd])).1)()
+}
+
+fn setup() {
+    let cmds = []
+
+    fn cmd(fun) {
+        let (name, *) = doc(fun)
+        cmds.push((name, fun))
+        return fun
+    }
+
+    fn adjln(fun, pat, combine=true) {
+        return fn () {
+            fn go(lines) {
+                let (
+                    &unzip(n=2) ~> (
+                        indices,
+                        include
+                    ),
+                    exclude
+                ) = lines.enumerate().partition(\_.1 :: pat)
+                [
+                    *exclude,
+                    *indices.zip(fun(include))
+                ].sort(by: &0).map(&1)
+            }
+
+            let lines  = slurp().lines()
+
+            let new-lines =
+                combine ? go(lines)
+                        : lines.group-by(\_ :: pat)
+                               .map(go)
+                               .flat()
+
+            for new-lines print(it)
+        }
+    }
+
+    @[cmd]
+    fn backslash() {
+        let lines = slurp().lines()
+        let len = lines.map(&comb(/\\\s*$/) |> &len).max()
+
+        print(
+            *lines.map(match {
+                /(.*\S)\s*\\\s*$/ => "{$1:-{len}} \\",
+                line              => line
+            }),
+            sep = '\n'
+        )
+    }
+
+    @[cmd]
+    @[adjln(eq-cols, combine=false)]
+    fn align-equals(lines) {
+        let lines = lines.map(
+            eq-cols |> ([_, space, pre, stars, id, eq?, rest] -> [
+                space,
+                pre.trim(),
+                ' ' + stars.comb(/\s/),
+                id,
+                eq? ? " {eq?} " : eq?,
+                rest.trim(),
+                ';'
+            ])
+        )
+
+        if lines == [] { return lines }
+
+        let align = [-1, 1, 1, 1, 0, 0]
+        let widths = [lines.map(`#` . &[i]).max() for i in ..#lines[0]]
+
+        ["{it[0]:{widths[0]}}" + it[1;].zip(widths[1;], align, |col, w, a| -> "{ col:{a*w}}").str() for lines]
+    }
+
+    @[cmd]
+    @[adjln(eq-pattern, combine=false)]
+    fn equals(lines) {
+        let lines = lines.map((\_ ..%.* &comb(/\s/)) . (\tuple(*_)) . &[1;] . eq-pattern)
+        let (w0, w1, w2, _) = lines.map(\_ % `#`).unzip4() % &max
+        lines.map(\(\"{_:{w0}}{_:-{w1}}{_:{w1 == 0 ? -w2 : w2 + 1}} = {_.trim()};")(*_))
+    }
+
+    @[cmd]
+    @[adjln(decl-pattern, combine=false)]
+    fn declarations(lines) {
+        let lines = lines.map((\_ .%.* &comb(/\s/)) . (\tuple(*_)) . &[1;] . decl-pattern)
+        let (w0, w1, _) = lines.map(\_ % `#`).unzip3() % &max
+        lines.map(\(\"{_:-{w0}} {_:{w1}}{almost-trim(_)};")(*_))
+    }
+
+    @[cmd]
+    fn initializers() {
+        let lines = slurp().lines()
+        let initializer = /\.(\w+)\s*=\s*((?:(?!\s*,\s*\.\w|\s*\}\s*,?\s*$).)+)\s*(,?)/u
+
+        let triple = [_, a, b, c] -> (a, b, c)
+
+        lines.map!(match
+            /^(\s*)\{.*\}\s*(,?)\s*$/ => (
+                $1,
+                $0.matches(initializer).map(triple),
+                $2
+            )
+            else it
+        )
+
+        let i = 0
+        let order = %{*: i++}
+        let widths = %{*: 0}
+        let indent = 0
+
+        lines.each(match {
+            (space, fields, _) => do {
+                for (name, val, _) in fields {
+                    widths[name] = max(widths[name], #val)
+                    let _ = order[name]
+                }
+                indent = max(indent, #space)
+            },
+            _ => ()
+        })
+
+        lines
+            .map(match {
+                (space, fields, comma)
+                     => "{space:{indent}}\<
+                       \>\{\<
+                       \> {
+                            fields
+                                .sort-on\(order[_.0])
+                                .map(${".{it.0} = {"{it.1}{it.2}":-{1+widths[it.0]}}"})
+                                .unwords()
+                        } \}{comma}"
+                line => line
+            })
+            .each(print@(_))
+    }
+
+    return cmds
+}
+
+/* vim: set ft=ty sts=4 sw=4 expandtab: */
